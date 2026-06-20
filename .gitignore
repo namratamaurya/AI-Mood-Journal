@@ -1,0 +1,10 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pycache/
+**/__pycache__/
+*.pyc
+backend/.venv/
+backend/mood_journal.db
+frontend/build/
