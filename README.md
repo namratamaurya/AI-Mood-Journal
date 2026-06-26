@@ -64,6 +64,17 @@ flutter pub get
 flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8000
 ```
 
+## Netlify Deployment
+
+This repo includes `netlify.toml` so Netlify builds the Flutter app from
+`frontend/`, publishes `frontend/build/web`, and serves `index.html` for app
+routes.
+
+In Netlify, set the `API_BASE_URL` environment variable to your deployed FastAPI
+backend URL before deploying. If the build image does not already include
+Flutter, install Flutter in the Netlify build environment or use a Flutter
+build image/plugin.
+
 ## API
 
 - `POST /entries` creates a journal entry and returns AI mood analysis
