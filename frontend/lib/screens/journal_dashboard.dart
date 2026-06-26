@@ -48,7 +48,7 @@ class _JournalDashboardState extends State<JournalDashboard> {
         _api.fetchWeeklySummary(),
       ]);
       setState(() {
-        _entries = results[0] as List<JournalEntry>;
+        _entries = _sortEntries(results[0] as List<JournalEntry>);
         _stats = results[1] as Stats;
         _summary = results[2] as WeeklySummary;
       });
@@ -59,6 +59,17 @@ class _JournalDashboardState extends State<JournalDashboard> {
         setState(() => _loading = false);
       }
     }
+  }
+
+  List<JournalEntry> _sortEntries(List<JournalEntry> entries) {
+    return [...entries]
+      ..sort((a, b) {
+        final dateCompare = b.entryDate.compareTo(a.entryDate);
+        if (dateCompare != 0) {
+          return dateCompare;
+        }
+        return b.createdAt.compareTo(a.createdAt);
+      });
   }
 
   Future<void> _saveEntry() async {

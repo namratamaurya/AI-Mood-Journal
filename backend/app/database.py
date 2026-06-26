@@ -28,7 +28,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
-                entry_date TEXT NOT NULL UNIQUE,
+                entry_date TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 mood TEXT NOT NULL,
                 confidence REAL NOT NULL,
@@ -61,13 +61,6 @@ def save_entry(content: str, entry_date: date, analysis: MoodAnalysis) -> Entry:
             """
             INSERT INTO entries (content, entry_date, created_at, mood, confidence, summary, signals)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(entry_date) DO UPDATE SET
-                content = excluded.content,
-                created_at = excluded.created_at,
-                mood = excluded.mood,
-                confidence = excluded.confidence,
-                summary = excluded.summary,
-                signals = excluded.signals
             RETURNING *
             """,
             (
@@ -86,7 +79,7 @@ def save_entry(content: str, entry_date: date, analysis: MoodAnalysis) -> Entry:
 def list_entries(limit: int = 180) -> list[Entry]:
     with connect() as db:
         rows = db.execute(
-            "SELECT * FROM entries ORDER BY entry_date DESC LIMIT ?",
+            "SELECT * FROM entries ORDER BY entry_date DESC, created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [row_to_entry(row) for row in rows]

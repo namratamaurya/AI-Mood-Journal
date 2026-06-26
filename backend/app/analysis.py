@@ -1,33 +1,154 @@
 import json
 import os
+import re
 from collections import Counter, defaultdict
 from datetime import date, timedelta
 
-from anthropic import Anthropic
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
 
 from .models import Entry, Mood, MoodAnalysis, PatternInsight, WeeklySummary
 
+LONG_ENTRY_CHAR_LIMIT = 1800
+SUMMARY_CHAR_LIMIT = 1200
+
 MOOD_KEYWORDS = {
-    Mood.happy: {"happy", "grateful", "excited", "peaceful", "proud", "joy", "good", "great", "love"},
-    Mood.anxious: {"anxious", "worried", "stress", "stressed", "nervous", "panic", "overwhelmed", "fear"},
-    Mood.sad: {"sad", "lonely", "tired", "hopeless", "hurt", "cry", "heavy", "down", "upset"},
-    Mood.energetic: {"energized", "energetic", "focused", "motivated", "productive", "strong", "alive", "ready"},
+    Mood.happy: {
+        "happy", "grateful", "excited", "peaceful", "proud", "joy",
+        "good", "great", "love", "relieved", "hopeful",
+    },
+    Mood.anxious: {
+        "anxious", "worried", "worry", "stress", "stressed", "nervous",
+        "panic", "panicked", "overwhelmed", "fear", "scared", "afraid",
+        "stolen", "missing", "unsafe", "uncertain", "bullied",
+        "bullying", "harassed", "threatened",
+    },
+    Mood.sad: {
+        "sad", "lonely", "tired", "hopeless", "hurt", "cry", "cried",
+        "heavy", "down", "upset", "breakup", "break-up", "heartbroken",
+        "broken", "dumped", "rejected", "grief", "loss", "lost",
+        "bullied", "bullying", "humiliated", "insulted",
+    },
+    Mood.energetic: {
+        "energized", "energetic", "focused", "motivated", "productive",
+        "strong", "alive", "ready",
+    },
     Mood.neutral: {"okay", "fine", "normal", "average", "routine", "calm"},
 }
 
+MOOD_PHRASES = {
+    Mood.sad: {
+        "had a breakup",
+        "went through a breakup",
+        "broke up",
+        "break up",
+        "relationship ended",
+        "got dumped",
+        "was bullied",
+        "got bullied",
+        "bullied at school",
+        "bullied today",
+        "lost my grandmother",
+        "lost my grandfather",
+        "lost my mother",
+        "lost my father",
+        "lost my parent",
+        "lost my sister",
+        "lost my brother",
+        "lost my friend",
+        "passed away",
+        "died today",
+    },
+    Mood.anxious: {
+        "phone got stolen",
+        "phone has got stolen",
+        "phone was stolen",
+        "got stolen",
+        "was stolen",
+        "has been stolen",
+        "i lost my phone",
+    },
+}
+
+
+def _split_sentences(content: str) -> list[str]:
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", content)
+        if sentence.strip()
+    ]
+    if len(sentences) <= 1:
+        return [line.strip() for line in content.splitlines() if line.strip()]
+    return sentences
+
+
+def _local_summarize_for_llm(content: str) -> str:
+    if len(content) <= LONG_ENTRY_CHAR_LIMIT:
+        return content
+
+    sentences = _split_sentences(content)
+    if not sentences:
+        return content[:SUMMARY_CHAR_LIMIT]
+
+    emotional_terms = set().union(*MOOD_KEYWORDS.values())
+    selected: list[str] = []
+
+    selected.extend(sentences[:2])
+    selected.extend(
+        sentence
+        for sentence in sentences[2:-1]
+        if any(term in sentence.lower() for term in emotional_terms)
+    )
+    if len(sentences) > 2:
+        selected.append(sentences[-1])
+
+    summary = " ".join(dict.fromkeys(selected))
+    if len(summary) > SUMMARY_CHAR_LIMIT:
+        summary = f"{summary[:SUMMARY_CHAR_LIMIT].rsplit(' ', 1)[0]}..."
+
+    return (
+        "Local summary of a long journal entry for mood analysis. "
+        f"Original length: {len(content)} characters. Summary: {summary}"
+    )
+
 
 def _fallback_analyze(content: str) -> MoodAnalysis:
+    normalized = content.lower()
     words = {word.strip(".,!?;:()[]\"'").lower() for word in content.split()}
     scores = {
         mood: len(words & keywords)
         for mood, keywords in MOOD_KEYWORDS.items()
     }
+    phrase_signals: dict[Mood, list[str]] = {}
+    for mood, phrases in MOOD_PHRASES.items():
+        matches = [phrase for phrase in phrases if phrase in normalized]
+        if matches:
+            phrase_signals[mood] = matches
+            scores[mood] += len(matches) * 2
+
+    if "bullied" in words or "bullying" in words:
+        scores[Mood.sad] += 2
+        scores[Mood.anxious] += 1
+
+    loved_one_terms = {
+        "grandmother", "grandfather", "mother", "father", "parent",
+        "sister", "brother", "friend", "grandma", "grandpa",
+    }
+    grief_terms = {"lost", "died", "death", "passed"}
+    if words & loved_one_terms and words & grief_terms:
+        scores[Mood.sad] += 3
+
     mood, score = max(scores.items(), key=lambda item: item[1])
     if score == 0:
         mood = Mood.neutral
     total_hits = sum(scores.values())
     confidence = 0.52 if total_hits == 0 else min(0.95, 0.55 + (score / max(total_hits, 1)) * 0.35)
-    signals = sorted(words & MOOD_KEYWORDS[mood])[:4]
+    signals = [
+        *sorted(words & MOOD_KEYWORDS[mood]),
+        *phrase_signals.get(mood, []),
+    ][:4]
     summary = {
         Mood.happy: "Your entry carries a warm, positive emotional tone.",
         Mood.anxious: "Your entry suggests worry, pressure, or anticipation.",
@@ -39,26 +160,42 @@ def _fallback_analyze(content: str) -> MoodAnalysis:
 
 
 async def analyze_entry(content: str) -> MoodAnalysis:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or AsyncOpenAI is None:
         return _fallback_analyze(content)
 
-    client = Anthropic(api_key=api_key)
+    analysis_text = _local_summarize_for_llm(content)
     prompt = (
-        "Analyze this journal entry. Return only JSON with keys: "
-        "mood, confidence, summary, signals. mood must be one of "
-        "happy, anxious, sad, neutral, energetic. confidence must be 0 to 1. "
-        f"Entry: {content}"
+        "Classify the emotional tone of this journal entry. "
+        "Do not over-infer. If the entry is factual, unclear, or mixed with no dominant emotion, use neutral. "
+        "Return only valid JSON with keys: mood, confidence, summary, signals. "
+        "mood must be one of happy, anxious, sad, neutral, energetic. "
+        "confidence must be between 0 and 1. "
+        "signals must include the exact words or events that caused the mood label. "
+        f"Entry: {analysis_text}"
     )
+    client = AsyncOpenAI(api_key=api_key)
+
     try:
-        message = client.messages.create(
-            model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-            max_tokens=300,
+        response = await client.responses.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            input=prompt,
+            max_output_tokens=300,
             temperature=0.2,
-            messages=[{"role": "user", "content": prompt}],
         )
-        text = message.content[0].text
-        return MoodAnalysis.model_validate(json.loads(text))
+
+        text = response.output_text
+        analysis = MoodAnalysis.model_validate(json.loads(text))
+
+        if analysis.confidence < 0.60:
+            return MoodAnalysis(
+                mood=Mood.neutral,
+                confidence=analysis.confidence,
+                summary="Your entry has mixed or unclear emotional signals.",
+                signals=analysis.signals,
+            )
+
+        return analysis
     except Exception:
         return _fallback_analyze(content)
 
