@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -7,7 +8,8 @@ from typing import Iterator
 
 from .models import Entry, MoodAnalysis
 
-DB_PATH = Path(__file__).resolve().parents[1] / "mood_journal.db"
+_DEFAULT_DB_PATH = Path(__file__).resolve().parents[1] / "mood_journal.db"
+DB_PATH = Path(os.getenv("DB_PATH", _DEFAULT_DB_PATH))
 
 
 @contextmanager
@@ -22,6 +24,7 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as db:
         db.execute(
             """
